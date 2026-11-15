@@ -1,0 +1,14 @@
+.env
+*.log
+*.venv
+*.sh
+*.pyc
+runtime/twitter_query_cursor.json*
+logs/
+*.json
+*.txt
+*.pt
+*.meta
+*.npy
+*.cypher
+*.csv
