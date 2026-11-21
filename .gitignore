@@ -12,3 +12,5 @@ logs/
 *.npy
 *.cypher
 *.csv
+*.safetensors
+/hf

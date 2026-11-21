@@ -18,6 +18,7 @@ requires-python = ">=3.12"
 dependencies = [
     "datasketch>=2.0.0",
     "faiss-cpu>=1.16.0",
+    "huggingface-hub>=0.36.2",
     "matplotlib>=3.11.2",
     "numpy>=2.5.4",
     "pandas>=3.1.1",

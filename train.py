@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 import config as C
 from config import BOARD_LABELS, BOARD_VALUE, TYPE_LABELS
-from model import GoodJob
+from model import GoodJobForSequenceClassification
 
 MODEL_KEYS = ("input_ids", "attention_mask", "token_type_ids")
 
@@ -94,11 +94,12 @@ def evaluate(model, loader, device):
     model.eval()
     tp, tt, bp, bt = [], [], [], []
     for b in loader:
-        lt, lb = model(**model_inputs(b, device))
+        o = model(**model_inputs(b, device)); lt, lb = o.logits, o.board_logits
         tp += lt.argmax(-1).cpu().tolist()
         tt += b["type_y"].tolist()
-        bp += lb.argmax(-1).cpu().tolist()
-        bt += b["board_y"].tolist()
+        keep = b["type_y"] != TYPE_LABELS.index("Not Job")
+        bp += lb.argmax(-1).cpu()[keep].tolist()
+        bt += b["board_y"][keep].tolist()
     return {**head_metrics("type", tt, tp, TYPE_LABELS),
             **head_metrics("board", bt, bp, BOARD_LABELS)}
 
@@ -139,14 +140,15 @@ def main():
     elif C.IMBALANCE == "weights":
         type_w = inverse_freq_weights([e["type_y"] for e in train_ds], len(TYPE_LABELS),
                                       C.CLASS_POWER).to(device)
-    board_w = (inverse_freq_weights([e["board_y"] for e in train_ds], len(BOARD_LABELS)).to(device)
-               if C.BOARD_WEIGHTS else None)
+    board_w = (inverse_freq_weights([e["board_y"] for e in train_ds if e["type_y"] != TYPE_LABELS.index("Not Job")],
+                                len(BOARD_LABELS)).to(device)
+           if C.BOARD_WEIGHTS else None)
 
     train_loader = DataLoader(train_ds, batch_size=C.BATCH_SIZE, sampler=sampler,
                               shuffle=sampler is None, collate_fn=collate)
     val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, collate_fn=collate)
 
-    model = GoodJob(C.MODEL).to(device)
+    model = GoodJobForSequenceClassification.from_base().to(device)
     enc_params = [p for n, p in model.named_parameters() if n.startswith("encoder.")]
     head_params = [p for n, p in model.named_parameters() if not n.startswith("encoder.")]
     opt = torch.optim.AdamW(
@@ -166,9 +168,11 @@ def main():
         run = 0.0
         for b in train_loader:
             with torch.autocast(device_type=device, dtype=torch.float16, enabled=device == "cuda"):
-                lt, lb = model(**model_inputs(b, device))
-                loss = (C.LAMBDA_TYPE * type_loss(lt.float(), b["type_y"].to(device))
-                        + C.LAMBDA_BOARD * board_loss(lb.float(), b["board_y"].to(device)))
+                o = model(**model_inputs(b, device)); lt, lb = o.logits, o.board_logits
+                ty = b["type_y"].to(device)
+                by = b["board_y"].to(device).masked_fill(ty == TYPE_LABELS.index("Not Job"), -100)
+                l_board = board_loss(lb.float(), by) if (by != -100).any() else lb.sum() * 0
+                loss = C.LAMBDA_TYPE * type_loss(lt.float(), ty) + C.LAMBDA_BOARD * l_board
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
