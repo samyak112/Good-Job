@@ -172,13 +172,6 @@ For the second pass, I use word unigrams and bigrams with TF-IDF.
 
 This is useful for detecting repeated job announcements and templates that share a lot of their original wording.
 
-For example:
-
-```text
-A: We are hiring a Python developer with 3 years of experience.
-B: We are hiring a Python developer with 4 years of experience.
-```
-
 These posts have a very similar structure and vocabulary, even though one requirement differs.
 
 TF-IDF helps identify this kind of textual overlap.
@@ -288,20 +281,6 @@ This gives an approximate 80/10/10 split.
 
 The important constraint is that an author group cannot appear in more than one split.
 
-### Why try multiple random seeds?
-
-Grouping by author makes it harder to get perfectly balanced label distributions.
-
-Some authors might have hundreds of posts, while others might have only a few. A single random split could produce an undesirable distribution across training, validation, and test.
-
-Instead of accepting the first split, I try multiple random seeds (300 by default).
-
-I compare the resulting splits using label-proportion error and validation/test size error, then select the split with the lowest combined error.
-
-This doesn't guarantee perfectly equal distributions. The author-group constraint takes priority because preventing leakage is more important than achieving an artificially perfect class distribution.
-
-I also check that no author group appears in multiple splits and that no records are lost during splitting.
-
 ## 9. Handling class imbalance
 
 After cleaning and splitting, the training data can still have an uneven number of examples per class.
@@ -355,15 +334,3 @@ Author-grouped splitting prevents the same author from appearing across training
 Finally, weighted sampling addresses class imbalance during training without permanently changing the dataset or artificially balancing evaluation data.
 
 The overall objective is not to make the dataset as small as possible. It is to remove redundant examples while preserving useful variation, prevent leakage between splits, and give underrepresented classes a reasonable chance to contribute during training.
-
-## Limitations
-
-Similarity does not prove that two posts are duplicates. A high score can also come from a shared template or common job description.
-
-The greedy selection algorithm is a heuristic. It doesn't guarantee the smallest possible dataset or the globally optimal set of representatives.
-
-The author-grouped split cannot guarantee perfectly equal label distributions because author groups cannot be divided between subsets.
-
-Weighted sampling also cannot create new information. If a class has very few distinct examples, sampling those examples more often does not replace collecting more data.
-
-These decisions are trade-offs. I prefer a slightly larger dataset with useful variation over a smaller dataset created by aggressively deleting anything that looks similar.
