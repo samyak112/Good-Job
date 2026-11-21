@@ -10,6 +10,8 @@ But training a classifier on raw social media data comes with its own problems. 
 
 This project is divided into two main parts: preparing the dataset and training the classifier.
 
+Link to Hugging face - https://huggingface.co/SpiderHomie/goodjob
+
 ## What does it classify?
 
 The model predicts the type of a post using four classes.
