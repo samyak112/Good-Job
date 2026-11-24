@@ -4,13 +4,11 @@
 
 The project is built around a simple problem: social media contains a lot of useful opportunities, but finding them programmatically is difficult. Posts are often repeated, written in different formats, published by job boards, or mixed with completely unrelated content.
 
-I wanted to build a classifier that can understand what a post is actually about instead of relying on keywords or a collection of regular expressions.
-
 But training a classifier on raw social media data comes with its own problems. Before working on the model, I needed to make sure the dataset was useful, sufficiently varied, and split in a way that wouldn't give misleading evaluation results.
 
 This project is divided into two main parts: preparing the dataset and training the classifier.
 
-Link to Hugging face - https://huggingface.co/SpiderHomie/goodjob
+Link to Hugging Face: https://huggingface.co/SpiderHomie/goodjob
 
 ## What does it classify?
 
@@ -23,9 +21,9 @@ The model predicts the type of a post using four classes.
 | `Other` | Paid work that isn't directly software-related, such as data annotation, RLHF, and evaluator work |
 | `Not Job` | Everything else |
 
-It also has a second task: identifying whether the publisher is a regular account or a job board.
+The model uses a BERT encoder with a single four-class classification head.
 
-The two tasks share the same BERT encoder but have separate classification heads.
+It also derives a binary `is_job` prediction from the four-class output, where anything other than `Not Job` is considered a potential opportunity.
 
 ## How the project works
 
@@ -48,18 +46,37 @@ The two tasks share the same BERT encoder but have separate classification heads
               Training dataset
                        |
                        v
-              Multi-task BERT
+                BERT encoder
                        |
-                +------+------+
-                |             |
-                v             v
-             Post type     Job board
-             prediction    prediction
+                       v
+           Four-class classification
+                       |
+             +---------+---------+
+             |         |         |
+             v         v         v
+           ML Job     Job      Other
+                       |
+                       v
+                    Not Job
 ```
 
 The dataset preparation stage focuses on removing redundant content, preserving useful examples, preventing author leakage, and handling class imbalance.
 
-The classifier stage focuses on learning the relationship between post content, opportunity categories, and publisher types.
+The classifier stage focuses on learning the relationship between post content and opportunity categories.
+
+## Evaluation
+
+The model was evaluated on a held-out test set of 823 posts, with data splits grouped by author to prevent the same account from appearing in multiple splits.
+
+| Metric | Test performance |
+|---|---:|
+| Accuracy | 89.91% |
+| Macro-F1 | 0.874 |
+| Test samples | 823 |
+
+The model achieved 98.12% recall on the `Not Job` class, while maintaining 89.36% recall on `ML Job`, 87.57% on `Job`, and 84.71% on `Other`.
+
+CPU inference was benchmarked at approximately 39 posts/second with 6 threads and batch size 32, measuring model forward-pass time without quantization.
 
 ## Project documentation
 
@@ -77,7 +94,7 @@ It also explains how I handle class imbalance without artificially changing the 
 
 Explains the model architecture and how it is trained.
 
-It covers the shared BERT encoder, the two classification heads, multi-task learning, the combined training objective, masked job-board loss, imbalance handling, optimization, evaluation, and inference.
+It covers the BERT encoder, the four-class classification head, training objectives, imbalance handling, optimization, evaluation, and inference.
 
 ## Why this approach?
 
