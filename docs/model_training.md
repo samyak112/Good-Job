@@ -1,37 +1,27 @@
-## What the classifier does
+# What the classifier does
 
-The classifier predicts two things for every post.
+The classifier predicts the type of a social media post using four classes.
 
-**Post type**
+| Label | Meaning |
+|---|---|
+| `ML Job` | Machine learning and AI-related jobs, including engineering and research roles |
+| `Job` | Software-related paid work, including engineering jobs, freelance work, and software services |
+| `Other` | Paid work that isn't directly software-related, such as data annotation, RLHF, and evaluator work |
+| `Not Job` | Everything else |
 
-| Label     | Meaning                                                                                           |
-| --------- | ------------------------------------------------------------------------------------------------- |
-| `ML Job`  | Machine learning and AI-related jobs, including engineering and research roles                    |
-| `Job`     | Software-related paid work, including engineering jobs, freelance work, and software services     |
-| `Other`   | Paid work that isn't directly software-related, such as data annotation, RLHF, and evaluator work |
-| `Not Job` | Everything else                                                                                   |
+The model also derives a binary `is_job` prediction from the four-class output. Any post classified as something other than `Not Job` is considered a potential opportunity.
 
-**Job board detection**
+The classifier focuses on understanding what a post describes rather than identifying the account that published it.
 
-The second task is binary classification. For posts that are jobs, does the publisher behave like a job board (an account that regularly publishes job opportunities) or like a regular account?
+## 1. Why I chose a single classification task
 
-The label comes from the `poster` field in my data.
+Initially, I experimented with multi-task learning to predict both the type of post and whether the publisher behaved like a job board.
 
-I kept this as a separate task because identifying what a post is about and identifying who published it are two different problems.
+However, these are different prediction problems. Post classification is about understanding the content of an individual post, while job-board detection is about identifying publishing patterns associated with an account.
 
-## 1. Why I chose multi-task learning
+It turns out that solely training on post text doesn't reliably predicts if a post is from a job board or not. So i have parked that classification for now
 
-Initially, I could have trained two separate classifiers: one for identifying the type of post and another for identifying job boards.
-
-But both tasks work with the same input and have some overlapping requirements.
-
-To classify a post correctly, the model needs to understand what kind of opportunity it describes. To identify a job board, it needs to understand patterns associated with accounts that regularly publish job opportunities.
-
-Both tasks can benefit from a shared language representation.
-
-Instead of maintaining two independent transformer models, I use one shared BERT encoder with two separate classification heads.
-
-The encoder learns a shared representation of the input, while each classification head learns its own task-specific patterns.
+This gives the model one clear objective: learn to distinguish between different types of opportunities and unrelated content.
 
 ## 2. The BERT classifier
 
@@ -46,85 +36,64 @@ The architecture looks like this:
                         Tokenizer
                            |
                            v
-                    Shared BERT encoder
+                     BERT encoder
                            |
                            v
-                     [CLS] representation
+                    [CLS] representation
                            |
-                    +------+------+
-                    |             |
-                    v             v
-                Type head     Board head
-                    |             |
-                    v             v
-                4 classes      2 classes
+                           v
+                   Classification head
+                           |
+                           v
+                       4 classes
+                           |
+             +------+------+------+
+             |      |      |      |
+             v      v      v      v
+           ML Job   Job   Other  Not Job
 ```
 
-The heads are simple linear layers:
+The classification head is a linear layer:
 
 - Type head: 768 → 4
-- Board head: 768 → 2
-
-The type head predicts `ML Job`, `Job`, `Other`, or `Not Job`.
-
-The board head predicts `Regular account` or `Job board`.
 
 ### Starting from pretrained BERT
 
-I load the pretrained weights from `bert-base-uncased` into the shared encoder.
+I load the pretrained weights from `bert-base-uncased` into the encoder.
 
-Both classification heads start with randomly initialized weights because they are specific to my dataset and tasks.
+The classification head starts with randomly initialized weights because it is specific to my dataset and task.
 
-During training, I fine-tune the entire encoder along with both heads. I don't freeze BERT.
+During training, I fine-tune the entire encoder along with the classification head. I don't freeze BERT.
 
-I also use separate learning rates for the encoder and classification heads.
+I also use separate learning rates for the encoder and classification head.
 
-The encoder gets a lower learning rate because it already contains useful pretrained representations. The newly initialized classification heads can use a higher learning rate because they need to learn the mapping between BERT representations and my labels.
+The encoder gets a lower learning rate because it already contains useful pretrained representations. The newly initialized classification head can use a higher learning rate because it needs to learn the mapping between BERT representations and my labels.
 
 This allows the model to adapt BERT's existing language understanding to the patterns found in my dataset.
 
 ## 3. Training objective
 
-Both classification heads use cross-entropy loss.
+The classifier uses cross-entropy loss.
 
-The type head calculates how far its predictions are from the actual post-type labels. The board head does the same for job-board labels.
+The loss measures how far the model's predicted class probabilities are from the actual post-type labels.
 
-I combine both losses into a single training objective:
+For a four-class classification problem, the objective is:
 
 ```python
-total_loss = (
-    LAMBDA_TYPE * type_loss
-    + LAMBDA_BOARD * board_loss
+loss = F.cross_entropy(
+    logits,
+    labels,
+    weight=class_weights,  # Optional
 )
 ```
 
 Mathematically:
 
-[
-L\_{\text{total}} =
-\lambda_t L\_{\text{type}}
-+
-\lambda_b L\_{\text{board}}
-]
+$L_{\text{type}} = -\sum_{c=1}^{4} y_c \log(p_c)$
 
-The lambda values control how much each task contributes to training.
+Here, \(y_c\) represents the ground-truth class and \(p_c\) represents the predicted probability for that class.
 
-### Masking the secondary task
-
-The job-board classification task is only meaningful when a post represents an opportunity.
-
-I don't want unrelated posts to contribute to the job-board loss. For example, if an account publishes a meme or a general discussion, whether that account is a job board is irrelevant to this particular training example.
-
-To handle this, I mask the job-board labels of all `Not Job` examples using PyTorch's ignored target index (`-100`).
-
-This means:
-
-- `ML Job`, `Job`, and `Other` contribute to both classification losses.
-- `Not Job` contributes only to the post-type classification loss.
-
-The encoder still learns from every example, but the board head only receives supervised learning signals from actual job posts.
-
-This keeps the two tasks connected without forcing the secondary task to learn from irrelevant examples.
+When class weighting is disabled, all classes contribute equally per example. When enabled, mistakes on underrepresented classes can contribute more to the training objective.
 
 ## 4. Handling class imbalance during training
 
@@ -178,28 +147,11 @@ I use replacement, which means an example can appear multiple times in an epoch 
 
 The weights come from the `sample_weight` field generated by the training data preparation pipeline.
 
-### Why I keep these approaches separate
-
-Class-weighted loss and weighted sampling solve the same general problem in different ways.
-
-With class-weighted loss, I change how much each example contributes to the optimization objective.
-
-With weighted sampling, I change how frequently each example is presented to the model.
-
-For the post-type task, I use either class-weighted loss or weighted sampling, depending on the configuration. I don't combine both.
-
-The job-board task has its own optional class-weighted loss because it has a separate label distribution.
-
-All imbalance handling is restricted to the training set. Validation and test retain their original distributions because I want to measure performance on data that hasn't been artificially balanced.
-
 ## 5. Inference
 
 The trained model exposes a `predict()` method that accepts either a single post or a list of posts.
 
-For every post, the model produces two sets of logits:
-
-- Type logits from the post-type head.
-- Board logits from the job-board head.
+For every post, the model produces four logits corresponding to the four post categories.
 
 I apply softmax to convert these into normalized class probabilities.
 
@@ -213,24 +165,56 @@ p_job = 1 - p_not_job
 
 Since the three opportunity categories are `ML Job`, `Job`, and `Other`, this gives me their combined probability.
 
-If the predicted type is `Not Job`, I don't return a job-board prediction.
-
-Otherwise, I return the predicted publisher category.
-
 The output includes:
 
 - Predicted type.
 - Probabilities for all four types.
 - Whether the post is an opportunity.
 - Combined opportunity probability.
-- Whether the publisher is a job board.
-- Job-board probability.
 
 This allows downstream systems to use both the predicted category and the model's probability estimates.
 
 The probabilities are softmax outputs and should not automatically be interpreted as calibrated confidence scores.
 
-## 6. The complete pipeline
+## 6. Evaluation
+
+The model is evaluated using author-grouped validation and test splits.
+
+Grouping by author prevents the same account from appearing in training, validation, and test sets. This helps reduce the risk of misleading evaluation results caused by the model seeing posts from familiar accounts.
+
+### Latest evaluation results
+
+| Metric | Validation | Test |
+|---|---:|---:|
+| Samples | 824 | 823 |
+| Accuracy | 89.44% | 89.91% |
+| Incorrect predictions | 87 | 83 |
+
+Test set class recall:
+
+| Class | Recall |
+|---|---:|
+| ML Job | 89.36% |
+| Job | 87.57% |
+| Other | 84.71% |
+| Not Job | 98.12% |
+
+The model performs particularly well at identifying unrelated posts, while distinguishing between different types of paid opportunities remains more challenging.
+
+The most common test-set errors involve `Job` being classified as `Other`, followed by `Job` being classified as `ML Job`.
+
+### CPU inference performance
+
+Measured on CPU with 6 threads, batch size 32, without quantization.
+
+| Split | Latency per post | Throughput |
+|---|---:|---:|
+| Validation | 27.86 ms | 35.9 posts/s |
+| Test | 25.62 ms | 39.0 posts/s |
+
+These measurements cover model forward-pass time only and exclude tokenization and preprocessing.
+
+## 7. The complete pipeline
 
 The project follows this sequence:
 
@@ -250,18 +234,16 @@ Author-grouped train/val/test split
 Training sample weights
         |
         v
-Multi-task BERT classifier
+BERT classifier
         |
         v
-Shared BERT encoder
+BERT encoder
         |
-        +----------------+
-        |                |
-        v                v
-    Type head        Board head
-        |                |
-        v                v
-   Post category     Publisher type
+        v
+Four-class classification
+        |
+        v
+Opportunity category
 ```
 
 Each stage solves a different problem.
@@ -272,16 +254,4 @@ The author-grouped split prevents the same author from leaking into training and
 
 Weighted sampling or class-weighted loss addresses class imbalance without permanently changing the dataset.
 
-Finally, the shared BERT encoder learns to classify post types and identify job boards using two separate heads.
-
-## Limitations
-
-There are a few limitations worth keeping in mind.
-
-The two classification tasks share an encoder, so their training signals can influence each other. This can be beneficial when both tasks learn useful shared representations, but it can also introduce conflicting gradients. A shared encoder doesn't automatically guarantee better performance than training separate models.
-
-The job-board head is trained only on posts that are classified as opportunities in the ground-truth data. It doesn't learn to identify job boards from unrelated posts.
-
-Finally, similarity-based deduplication doesn't prove that two posts are duplicates. Similarity can also come from shared templates or common job descriptions.
-
-The goal of this project is to build a classifier that learns from useful and varied examples, rather than simply training on as many collected posts as possible.
+Finally, the BERT encoder learns to classify posts into the four opportunity categories.
