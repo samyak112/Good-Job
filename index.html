@@ -82,6 +82,27 @@
   progress::-webkit-progress-value { background: var(--accent); }
   progress::-moz-progress-bar { background: var(--accent); }
 
+  [hidden] { display: none !important; }
+
+  #consent {
+    margin-top: 1.25rem; padding: 1.1rem 1.25rem;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  }
+  #consent p { margin: 0 0 .9rem; }
+  #consent p:last-child { margin-bottom: 0; }
+  .btns { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+  .btn, #consent button {
+    font: inherit; font-weight: 600; cursor: pointer; text-decoration: none;
+    border-radius: 10px; padding: .6rem 1.2rem; display: inline-block;
+    background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent);
+  }
+  #consent button.secondary, .btn.secondary {
+    background: transparent; color: var(--ink); border-color: var(--line);
+  }
+  #consent button.secondary:hover, .btn.secondary:hover { border-color: var(--accent); }
+  .filepick { display: block; margin-top: 1rem; font-size: .92rem; color: var(--muted); }
+  .filepick input { display: block; margin-top: .35rem; font: inherit; color: var(--ink); }
+
   #result { margin-top: 2rem; }
   #result[hidden] { display: none; }
   .verdict { font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em; margin: 0 0 1rem; }
@@ -126,6 +147,25 @@
   <p id="status" role="status" aria-live="polite">Starting…</p>
   <progress id="bar" max="100" value="0"></progress>
 
+  <section id="consent" hidden aria-live="polite">
+    <div id="choices">
+      <p><strong>This page needs to download its model (about 440 MB).</strong> It is saved in your browser, so you only download it once. Your text is never uploaded.</p>
+      <div class="btns">
+        <button type="button" id="accept">Download and start</button>
+        <button type="button" id="decline" class="secondary">Not now</button>
+      </div>
+    </div>
+    <div id="declined" hidden>
+      <p>Nothing has been downloaded. You can save the model file to your computer yourself, or change your mind and let this page download it.</p>
+      <div class="btns">
+        <a class="btn" id="manual" href="#" rel="noopener">Download model file (.onnx)</a>
+        <button type="button" id="accept2" class="secondary">Download and run it here instead</button>
+      </div>
+      <label class="filepick">Already saved the file? Select it to run the model without downloading again.
+        <input type="file" id="pick" accept=".onnx">
+      </label>
+    </div></section>
+
   <section id="result" hidden aria-live="polite">
     <p class="verdict" id="verdict"></p>
     <div id="rows"></div>
@@ -134,7 +174,7 @@
 
   <footer>
     Model: <a href="https://huggingface.co/SpiderHomie/goodjob">SpiderHomie/goodjob</a>.
-    The first visit downloads about 440 MB, then your browser keeps it for next time.
+    The page asks before downloading the model (about 440 MB), then your browser keeps it for next time.
   </footer>
 </main>
 
@@ -160,7 +200,8 @@ const EXAMPLES = [
 ];
 
 const $ = id => document.getElementById(id);
-const statusEl = $("status"), bar = $("bar"), goBtn = $("go"), textEl = $("text");
+const statusEl = $("status"), bar = $("bar"), goBtn = $("go"), textEl = $("text"),
+      consent = $("consent");
 let tokenizer, session, meta;
 
 function setStatus(msg, isError = false) {
@@ -209,7 +250,8 @@ async function loadModelBytes(url) {
   return bytes;
 }
 
-async function init() {
+async function startLoad(file) {
+  consent.hidden = true;
   const t0 = performance.now();
   setStatus("Loading tokenizer…");
   [tokenizer, meta] = await Promise.all([
@@ -220,7 +262,9 @@ async function init() {
     })
   ]);
 
-  let bytes = await loadModelBytes(MODEL_URL);
+  let bytes = file
+    ? new Uint8Array(await file.arrayBuffer())
+    : await loadModelBytes(MODEL_URL);
   bar.classList.remove("on");
   setStatus("Starting the model…");
   session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
@@ -298,10 +342,52 @@ $("examples").addEventListener("click", e => {
   textEl.focus();
 });
 
-init().catch(e => {
-  bar.classList.remove("on");
-  setStatus("Could not load the model: " + e.message, true);
+async function modelIsCached() {
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    return !!(await cache.match(MODEL_URL));
+  } catch { return false; }
+}
+
+function showChoices() {
+  $("choices").hidden = false;
+  $("declined").hidden = true;
+  consent.hidden = false;
+}
+
+async function run(file) {
+  try {
+    await startLoad(file);
+  } catch (e) {
+    bar.classList.remove("on");
+    setStatus("Could not load the model: " + e.message, true);
+    showChoices();
+  }
+}
+
+$("manual").href = `${MODEL_URL}?download=true`;
+$("accept").addEventListener("click", () => run());
+$("accept2").addEventListener("click", () => run());
+$("decline").addEventListener("click", () => {
+  $("choices").hidden = true;
+  $("declined").hidden = false;
+  setStatus("Model not downloaded, so classification is unavailable for now.");
 });
+$("pick").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (f) run(f);
+});
+
+// Already saved in this browser from an earlier visit: load it without asking.
+// Otherwise wait for the visitor's permission before downloading anything large.
+(async () => {
+  if (await modelIsCached()) {
+    run();
+  } else {
+    setStatus("Waiting for your permission to download the model.");
+    showChoices();
+  }
+})();
 </script>
 </body>
 </html>
