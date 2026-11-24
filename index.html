@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoodJob: job post classifier</title>
+<meta name="description" content="Classify a post as ML job, job, other, or not a job. Runs entirely in your browser.">
+<style>
+  :root {
+    --bg: #f6f7f4;
+    --surface: #ffffff;
+    --ink: #16202e;
+    --muted: #5d6877;
+    --line: #d9ddd6;
+    --accent: #0f6b62;
+    --accent-ink: #ffffff;
+    --track: #e7eae4;
+    --warn: #9a3412;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12171d;
+      --surface: #1a2129;
+      --ink: #e8ecef;
+      --muted: #94a0ad;
+      --line: #2c3641;
+      --accent: #4fc3b4;
+      --accent-ink: #08201c;
+      --track: #26303a;
+      --warn: #fb923c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 3rem 1.25rem 4rem; }
+  h1 { font-size: 2rem; line-height: 1.15; margin: 0 0 .5rem; letter-spacing: -.02em; }
+  .lede { margin: 0 0 1.75rem; color: var(--muted); max-width: 56ch; }
+
+  .examples { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .75rem; align-items: center; }
+  .examples span { color: var(--muted); font-size: .9rem; margin-right: .25rem; }
+  .chip {
+    font: inherit; font-size: .9rem; color: var(--ink);
+    background: transparent; border: 1px solid var(--line); border-radius: 999px;
+    padding: .25rem .8rem; cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); }
+
+  textarea {
+    width: 100%; min-height: 180px; resize: vertical;
+    padding: .9rem 1rem; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    font: inherit;
+  }
+  textarea::placeholder { color: var(--muted); }
+
+  .actions { display: flex; align-items: center; gap: 1rem; margin-top: .75rem; flex-wrap: wrap; }
+  #go {
+    font: inherit; font-weight: 600;
+    background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 10px; padding: .65rem 1.4rem; cursor: pointer;
+  }
+  #go:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: .85rem; }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #status { margin: 1.5rem 0 0; color: var(--muted); font-size: .92rem; }
+  #status.error { color: var(--warn); }
+  progress {
+    display: none; width: 100%; height: 8px; margin-top: .5rem;
+    appearance: none; -webkit-appearance: none; border: 0; border-radius: 4px;
+    background: var(--track); overflow: hidden;
+  }
+  progress.on { display: block; }
+  progress::-webkit-progress-bar { background: var(--track); }
+  progress::-webkit-progress-value { background: var(--accent); }
+  progress::-moz-progress-bar { background: var(--accent); }
+
+  #result { margin-top: 2rem; }
+  #result[hidden] { display: none; }
+  .verdict { font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em; margin: 0 0 1rem; }
+  .verdict small { font-size: .95rem; font-weight: 400; color: var(--muted); margin-left: .5rem; }
+  .row { display: grid; grid-template-columns: 6.5rem 1fr 3.6rem; gap: .75rem; align-items: center; margin: .45rem 0; }
+  .row .name { font-size: .95rem; }
+  .row .pct { text-align: right; font-variant-numeric: tabular-nums; font-size: .95rem; color: var(--muted); }
+  .row.top .name, .row.top .pct { color: var(--ink); font-weight: 600; }
+  .track { height: 12px; background: var(--track); border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--muted); border-radius: 6px; transition: width .25s ease-out; }
+  .row.top .fill { background: var(--accent); }
+  #timing { margin: 1rem 0 0; color: var(--muted); font-size: .85rem; }
+
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .85rem; }
+  footer a { color: inherit; }
+
+  @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+  @media (max-width: 480px) { .row { grid-template-columns: 5.5rem 1fr 3.2rem; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>GoodJob</h1>
+  <p class="lede">Paste a post and the model tells you whether it is an ML job, another job, something else, or not a job. It runs on your own CPU in this tab, so your text is never uploaded.</p>
+
+  <div class="examples" id="examples">
+    <span>Try an example:</span>
+    <button type="button" class="chip" data-i="0">ML role</button>
+    <button type="button" class="chip" data-i="1">Other role</button>
+    <button type="button" class="chip" data-i="2">Job seeker</button>
+    <button type="button" class="chip" data-i="3">Unrelated</button>
+  </div>
+
+  <label for="text" class="hint" style="display:block;margin-bottom:.35rem">Post text</label>
+  <textarea id="text" placeholder="We're hiring a machine learning engineer to work on ranking models…"></textarea>
+
+  <div class="actions">
+    <button id="go" type="button" disabled>Classify</button>
+    <span class="hint">Ctrl or ⌘ + Enter also works</span>
+  </div>
+
+  <p id="status" role="status" aria-live="polite">Starting…</p>
+  <progress id="bar" max="100" value="0"></progress>
+
+  <section id="result" hidden aria-live="polite">
+    <p class="verdict" id="verdict"></p>
+    <div id="rows"></div>
+    <p id="timing"></p>
+  </section>
+
+  <footer>
+    Model: <a href="https://huggingface.co/SpiderHomie/goodjob">SpiderHomie/goodjob</a>.
+    The first visit downloads about 440 MB, then your browser keeps it for next time.
+  </footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+<script type="module">
+import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.0";
+
+// ---- config -------------------------------------------------------------
+const REPO = "SpiderHomie/goodjob";
+const BASE = `https://huggingface.co/${REPO}/resolve/main`;
+const MODEL_URL = `${BASE}/onnx/model.onnx`;
+const LABELS_URL = `${BASE}/onnx/labels.json`;
+const CACHE_NAME = "goodjob-model-v1";
+// -------------------------------------------------------------------------
+
+ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
+
+const EXAMPLES = [
+  "We're hiring a Machine Learning Engineer to build and deploy ranking models for our search team. You'll work with PyTorch, run experiments, and ship to production. Remote friendly. Apply at the link below.",
+  "Our restaurant group is looking for a full-time line cook for our downtown location. Evenings and weekends, competitive pay, staff meals included. Message us to apply.",
+  "I was laid off last month and I'm looking for a new role in data analysis. Four years of experience with SQL and Python. Happy to chat if you know of any openings.",
+  "Just finished a 10 km run along the river this morning. The weather was perfect and I finally beat my personal best. Highly recommend it if you're in the area."
+];
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status"), bar = $("bar"), goBtn = $("go"), textEl = $("text");
+let tokenizer, session, meta;
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.classList.toggle("error", isError);
+}
+
+// Download with progress, using the Cache API so the file survives page reloads.
+async function loadModelBytes(url) {
+  let cache = null;
+  try {
+    cache = await caches.open(CACHE_NAME);
+    const hit = await cache.match(url);
+    if (hit) {
+      setStatus("Reading model from browser cache…");
+      return new Uint8Array(await hit.arrayBuffer());
+    }
+  } catch { cache = null; }
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`model download failed (HTTP ${res.status})`);
+  const total = +res.headers.get("content-length") || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let got = 0;
+  bar.classList.add("on");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    if (total) bar.value = (got / total) * 100;
+    setStatus(total
+      ? `Downloading model: ${(got / 1e6).toFixed(0)} of ${(total / 1e6).toFixed(0)} MB`
+      : `Downloading model: ${(got / 1e6).toFixed(0)} MB`);
+  }
+  const bytes = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) { bytes.set(c, off); off += c.length; }
+  chunks.length = 0;
+
+  if (cache) {
+    try { await cache.put(url, new Response(bytes.slice(), { headers: { "content-type": "application/octet-stream" } })); }
+    catch { /* quota exceeded: fine, just download again next visit */ }
+  }
+  return bytes;
+}
+
+async function init() {
+  const t0 = performance.now();
+  setStatus("Loading tokenizer…");
+  [tokenizer, meta] = await Promise.all([
+    AutoTokenizer.from_pretrained(REPO),
+    fetch(LABELS_URL).then(r => {
+      if (!r.ok) throw new Error(`labels.json not found (HTTP ${r.status})`);
+      return r.json();
+    })
+  ]);
+
+  let bytes = await loadModelBytes(MODEL_URL);
+  bar.classList.remove("on");
+  setStatus("Starting the model…");
+  session = await ort.InferenceSession.create(bytes, { executionProviders: ["wasm"] });
+  bytes = null; // let the buffer be garbage collected
+
+  setStatus(`Model ready (loaded in ${((performance.now() - t0) / 1000).toFixed(1)} s). Paste a post to classify it.`);
+  goBtn.disabled = false;
+}
+
+const toTensor = t => new ort.Tensor("int64", t.data, t.dims);
+
+function softmax(a) {
+  const m = Math.max(...a);
+  const e = a.map(x => Math.exp(x - m));
+  const s = e.reduce((p, c) => p + c, 0);
+  return e.map(x => x / s);
+}
+
+async function classify() {
+  const text = textEl.value.trim();
+  if (!text || !session) return;
+  goBtn.disabled = true;
+  try {
+    const t0 = performance.now();
+    const enc = await tokenizer(text, { truncation: true, max_length: meta.max_len, padding: true });
+    const feeds = {
+      input_ids: toTensor(enc.input_ids),
+      attention_mask: toTensor(enc.attention_mask),
+      token_type_ids: enc.token_type_ids
+        ? toTensor(enc.token_type_ids)
+        : new ort.Tensor("int64", new BigInt64Array(enc.input_ids.data.length), enc.input_ids.dims)
+    };
+    const { logits } = await session.run(feeds);
+    const probs = softmax(Array.from(logits.data));
+    const best = probs.indexOf(Math.max(...probs));
+    const ms = performance.now() - t0;
+
+    $("verdict").innerHTML = "";
+    $("verdict").append(meta.labels[best]);
+    const conf = document.createElement("small");
+    conf.textContent = `${(probs[best] * 100).toFixed(1)}% confident`;
+    $("verdict").append(conf);
+
+    const rows = $("rows");
+    rows.innerHTML = "";
+    meta.labels.forEach((label, i) => {
+      const row = document.createElement("div");
+      row.className = "row" + (i === best ? " top" : "");
+      row.innerHTML = '<span class="name"></span><div class="track"><div class="fill"></div></div><span class="pct"></span>';
+      row.querySelector(".name").textContent = label;
+      row.querySelector(".pct").textContent = `${(probs[i] * 100).toFixed(1)}%`;
+      rows.append(row);
+      requestAnimationFrame(() => { row.querySelector(".fill").style.width = `${(probs[i] * 100).toFixed(1)}%`; });
+    });
+
+    const truncated = enc.input_ids.dims[1] >= meta.max_len;
+    $("timing").textContent = `Inference took ${ms.toFixed(0)} ms on this device.` +
+      (truncated ? ` Long post: only the first ${meta.max_len} tokens were used.` : "");
+    $("result").hidden = false;
+  } catch (e) {
+    setStatus("Classification failed: " + e.message, true);
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+
+goBtn.addEventListener("click", classify);
+textEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); classify(); }
+});
+$("examples").addEventListener("click", e => {
+  const b = e.target.closest(".chip");
+  if (!b) return;
+  textEl.value = EXAMPLES[+b.dataset.i];
+  textEl.focus();
+});
+
+init().catch(e => {
+  bar.classList.remove("on");
+  setStatus("Could not load the model: " + e.message, true);
+});
+</script>
+</body>
+</html>
