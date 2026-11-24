@@ -9,7 +9,7 @@ SPLITS_DIR = "splits"          # from split_and_sample.py (train.json, val.json,
 OUT_DIR = "runs/run"           # best.pt, tokenizer/, config.json, history.json, ...
 
 # ---------------- labels ----------------
-TYPE_LABELS = ["ML Job", "Job", "Other", "Not Job"]
+TYPE_LABELS = ["ML JOB", "JOB", "OTHER", "NOT JOB"]
 BOARD_LABELS = ["Regular account", "Job board"]
 BOARD_VALUE = "Job board"      # `poster` value meaning job board; anything else = regular
 
@@ -20,7 +20,7 @@ USE_AUTHOR = False             # True: feed `author [SEP] post_text`
 
 # ---------------- optimisation ----------------
 EPOCHS = 5
-PATIENCE = 2                   # early stop after this many epochs without val improvement
+PATIENCE = 10                   # early stop after this many epochs without val improvement
 LR = 3e-5                      # encoder
 HEAD_LR = 1e-3                 # classification heads
 BATCH_SIZE = 16
@@ -32,7 +32,7 @@ LAMBDA_TYPE = 1.0
 LAMBDA_BOARD = 1.0
 
 # ---------------- class imbalance ----------------
-IMBALANCE = "none"             # job-type head, pick ONE: "none" | "weights" | "sampler"
+IMBALANCE = "weights"           # job-type head, pick ONE: "none" | "weights" | "sampler"
 CLASS_POWER = 1.0              # exponent for IMBALANCE = "weights"
 BOARD_WEIGHTS = False          # inverse-frequency weights for the job-board head
 

@@ -1,18 +1,15 @@
 """
 Export a trained GoodJob checkpoint to the Hugging Face Hub.
 
-Usage:
-    python export_to_hf.py --checkpoint path/to/checkpoint --repo your-username/goodjob --no-push   # dry run
-    python export_to_hf.py --checkpoint path/to/checkpoint --repo your-username/goodjob             # upload
+Edit the CONFIG block below, then run:  python export_to_hf.py
 
---checkpoint can be:
+CHECKPOINT can be:
     - a directory saved with model.save_pretrained(...)
     - an old .pt / .pth file saved with torch.save(model.state_dict(), ...)
 
 Run `hf auth login` (with a write token) once before uploading.
 """
 
-import argparse
 from pathlib import Path
 
 import torch
@@ -20,6 +17,16 @@ from huggingface_hub import HfApi
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from model import MODEL, GoodJobConfig, GoodJobForSequenceClassification
+
+# ----------------------------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------------------------
+CHECKPOINT = "runs/run/best.pt"       # save_pretrained directory, or an old .pt file
+REPO = "spiderhomie/goodjob"       # Hub repo id
+OUT_DIR = "hf_export"                # local folder for the exported files
+PUBLIC = True                       # False = private repo
+PUSH = True                          # False = export and verify only, no upload
+# ----------------------------------------------------------------------------
 
 
 def load_checkpoint(ckpt: Path) -> GoodJobForSequenceClassification:
@@ -33,6 +40,9 @@ def load_checkpoint(ckpt: Path) -> GoodJobForSequenceClassification:
             sd = sd[key]
             break
 
+    # drop the removed board head's weights
+    sd = {k: v for k, v in sd.items() if not k.startswith("board_head.")}
+
     model = GoodJobForSequenceClassification.from_base()
     missing, unexpected = model.load_state_dict(sd, strict=False)
     unexpected = [k for k in unexpected if not k.endswith("position_ids")]
@@ -43,17 +53,8 @@ def load_checkpoint(ckpt: Path) -> GoodJobForSequenceClassification:
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", required=True,
-                    help="save_pretrained directory, or an old .pt file")
-    ap.add_argument("--repo", required=True, help="e.g. your-username/goodjob")
-    ap.add_argument("--out", default="hf_export", help="local folder for the exported files")
-    ap.add_argument("--public", action="store_true", help="make the repo public (default: private)")
-    ap.add_argument("--no-push", action="store_true", help="export and verify only, no upload")
-    args = ap.parse_args()
-
-    ckpt = Path(args.checkpoint)
-    out = Path(args.out)
+    ckpt = Path(CHECKPOINT)
+    out = Path(OUT_DIR)
 
     # 1. load trained weights into the Hub-compatible model
     model = load_checkpoint(ckpt)
@@ -80,19 +81,18 @@ def main():
     with torch.inference_mode():
         a, b = model(**x), reloaded(**x)
     assert torch.allclose(a.logits, b.logits, atol=1e-5), "type head mismatch after reload"
-    assert torch.allclose(a.board_logits, b.board_logits, atol=1e-5), "board head mismatch after reload"
     print("reload parity OK")
     print(reloaded.predict(samples[0], tokenizer=tok))
 
     # 4. upload the exact folder that was just tested
-    if args.no_push:
-        print("--no-push set: nothing uploaded")
+    if not PUSH:
+        print("PUSH=False: nothing uploaded")
         return
 
     api = HfApi()
-    api.create_repo(args.repo, private=not args.public, exist_ok=True)
-    api.upload_folder(folder_path=str(out), repo_id=args.repo, commit_message="Export GoodJob")
-    print(f"pushed to https://huggingface.co/{args.repo}")
+    api.create_repo(REPO, private=not PUBLIC, exist_ok=True)
+    api.upload_folder(folder_path=str(out), repo_id=REPO, commit_message="Export GoodJob")
+    print(f"pushed to https://huggingface.co/{REPO}")
 
 
 if __name__ == "__main__":

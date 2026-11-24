@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-Author-grouped, label-stratified 80/10/10 split + WeightedRandomSampler for training.
+Author-grouped, label-stratified 80/10/10 split (deterministic) + WeightedRandomSampler.
 
-Usage:
-    python split_and_sample.py --input posts.json --out-dir splits
+Edit the CONFIG block below, then run:  python split_and_sample.py
 
-Input: JSON array (or JSONL) of post objects with at least `author` and `label`.
-Authors are grouped as (source, author), so the same handle on Twitter and LinkedIn is kept separate.
-
-Outputs (in --out-dir):
+Outputs (in OUT_DIR):
     train.json, val.json, test.json   (train.json has an extra `sample_weight` field)
     split_report.txt, split_authors.json
 
@@ -18,16 +14,26 @@ In your training code:
     loader = DataLoader(train_ds, batch_size=32, sampler=sampler)   # do NOT pass shuffle=True
     val/test loaders: shuffle=False, no sampler (natural distribution)
 """
-import argparse
 import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
 
-LABELS = ["ML Job", "Job", "Other", "Not Job"]
+# ----------------------------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------------------------
+INPUT = "data_pipeline/dataset/training_data_labelled.json"          # .json / .jsonl / .csv / .parquet
+OUT_DIR = "splits"
+AUTHOR_COL = "author"
+LABEL_COL = "label"
+SOURCE_COL = "source"         # authors are grouped as (source, author); ignored if column is absent
+RATIOS = (0.8, 0.1, 0.1)      # train / val / test
+CLASS_POWER = 1.0             # 1.0 = full inverse-frequency, 0.5 = softer, 0 = off
+AUTHOR_POWER = 0.0            # 0 = ignore authors, 0.5 = downweight prolific authors by 1/sqrt(n)
+MAX_PASSES = 50               # max refinement passes in the split
 
+LABELS = ["ML JOB", "JOB", "OTHER", "NOT JOB"]
 
 # ----------------------------------------------------------------------------
 # Loading
@@ -48,51 +54,84 @@ def load_df(path: str) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------------
-# Step 1: author-based, label-stratified split
+# Step 1: deterministic author-grouped, label-stratified split
 # ----------------------------------------------------------------------------
 def label_dist(s: pd.Series, labels) -> np.ndarray:
     return s.value_counts(normalize=True).reindex(labels).fillna(0).values
 
 
-def one_split(df, author_col, label_col, seed, n_splits=10):
-    """10 folds of ~10% each: fold 0 = val, fold 1 = test, the rest = train."""
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    fold = np.zeros(len(df), dtype=int)
-    for k, (_, idx) in enumerate(sgkf.split(df, df[label_col], groups=df[author_col])):
-        fold[idx] = k
-    return df[fold >= 2], df[fold == 0], df[fold == 1]
+def author_split(df, author_col, label_col, ratios=RATIOS, max_passes=MAX_PASSES):
+    """
+    Greedy assignment of whole authors to train/val/test, then single-author
+    move refinement. Cost = squared fraction of each class (and of total posts)
+    that is misallocated vs. the target ratios, so rare classes count as much
+    as common ones. No randomness: same input -> same split.
+    """
+    present = set(df[label_col])
+    labels = [l for l in LABELS if l in present] + sorted(present - set(LABELS))
+    L = len(labels)
 
+    codes, authors = pd.factorize(df[author_col], sort=True)  # independent of row order
+    lab = pd.Categorical(df[label_col], categories=labels).codes
+    A = len(authors)
 
-def split_score(df, parts, label_col, labels, target):
-    """Lower is better: label-proportion error + size error, over val and test."""
-    total = len(df)
-    score = 0.0
-    for part in parts[1:]:
-        score += np.abs(label_dist(part[label_col], labels) - target).max()
-        score += abs(len(part) / total - 0.10)
-    return score
+    # per-author class counts; last column = total posts
+    C = np.zeros((A, L + 1))
+    np.add.at(C, (codes, lab), 1)
+    C[:, L] = C[:, :L].sum(1)
+    total = C.sum(0)
+    target = np.asarray(ratios)[:, None] * total  # (3, L+1)
 
+    def cost(S):
+        return (((S - target) / total) ** 2).sum()
 
-def author_split(df, author_col, label_col, n_seeds=300, base_seed=0):
-    labels = [l for l in LABELS if l in set(df[label_col])] or sorted(df[label_col].unique())
-    target = label_dist(df[label_col], labels)
-    best = None
-    for s in range(base_seed, base_seed + n_seeds):
-        parts = one_split(df, author_col, label_col, s)
-        sc = split_score(df, parts, label_col, labels, target)
-        if best is None or sc < best[0]:
-            best = (sc, s, parts)
-    _, seed, (train, val, test) = best
+    S = np.zeros_like(target)
+    assign = np.empty(A, dtype=int)
+
+    # greedy: biggest authors first (stable sort -> ties resolved alphabetically)
+    for a in np.argsort(-C[:, L], kind="stable"):
+        costs = []
+        for s in range(3):
+            S[s] += C[a]
+            costs.append(cost(S))
+            S[s] -= C[a]
+        assign[a] = int(np.argmin(costs))
+        S[assign[a]] += C[a]
+
+    # refine: move single authors while it lowers the cost
+    for _ in range(max_passes):
+        moved = False
+        for a in range(A):
+            cur = assign[a]
+            best_s, best_c = cur, cost(S)
+            S[cur] -= C[a]
+            for s in range(3):
+                if s == cur:
+                    continue
+                S[s] += C[a]
+                c = cost(S)
+                S[s] -= C[a]
+                if c < best_c - 1e-12:
+                    best_s, best_c = s, c
+            S[best_s] += C[a]
+            if best_s != cur:
+                assign[a] = best_s
+                moved = True
+        if not moved:
+            break
+
+    split_of_row = assign[codes]
+    train, val, test = (df[split_of_row == k].copy() for k in range(3))
 
     # Hard guarantee: no author in more than one subset
     a_tr, a_va, a_te = (set(d[author_col]) for d in (train, val, test))
     assert not (a_tr & a_va or a_tr & a_te or a_va & a_te), "Author leakage!"
     assert len(train) + len(val) + len(test) == len(df)
-    return train.copy(), val.copy(), test.copy(), seed, labels
+    return train, val, test, labels
 
 
-def build_report(df, train, val, test, seed, labels, label_col, author_col):
-    lines = [f"Best seed: {seed}", f"Total posts: {len(df)}, authors: {df[author_col].nunique()}", ""]
+def build_report(df, train, val, test, labels, label_col, author_col):
+    lines = [f"Total posts: {len(df)}, authors: {df[author_col].nunique()}", ""]
     header = f"{'subset':<8}{'posts':>7}{'share':>8}{'authors':>9}  " + "  ".join(f"{l:>8}" for l in labels)
     lines.append(header)
     for name, d in (("all", df), ("train", train), ("val", val), ("test", test)):
@@ -121,7 +160,8 @@ def compute_sample_weights(train, label_col, author_col=None, class_power=1.0, a
     return (w / w.mean()).values  # normalized to mean 1
 
 
-def make_train_sampler(train, label_col="label", author_col=None, class_power=1.0, author_power=0.0):
+def make_train_sampler(train, label_col=LABEL_COL, author_col=None,
+                       class_power=CLASS_POWER, author_power=AUTHOR_POWER):
     import torch
     from torch.utils.data import WeightedRandomSampler
 
@@ -137,46 +177,48 @@ def make_train_sampler(train, label_col="label", author_col=None, class_power=1.
 # Main
 # ----------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--author-col", default="author")
-    ap.add_argument("--label-col", default="label")
-    ap.add_argument("--out-dir", default="splits")
-    ap.add_argument("--seeds", type=int, default=300, help="number of random seeds to search")
-    ap.add_argument("--class-power", type=float, default=1.0)
-    ap.add_argument("--author-power", type=float, default=0.0)
-    args = ap.parse_args()
-
-    df = load_df(args.input).reset_index(drop=True)
-    for c in (args.author_col, args.label_col):
+    df = load_df(INPUT).reset_index(drop=True)
+    for c in (AUTHOR_COL, LABEL_COL):
         if c not in df.columns:
             raise SystemExit(f"Column '{c}' not found. Columns: {list(df.columns)}")
+
+    # Drop rows with missing label/author
     n0 = len(df)
-    df = df[df[args.label_col].astype(str).str.strip().ne("") & df[args.label_col].notna()]
-    df = df[df[args.author_col].notna()].reset_index(drop=True)
+    df = df[df[LABEL_COL].notna() & df[LABEL_COL].astype(str).str.strip().ne("")]
+    df = df[df[AUTHOR_COL].notna()].reset_index(drop=True)
     if len(df) < n0:
         print(f"Dropped {n0 - len(df)} rows with missing label/author")
 
+    # Case/whitespace-insensitive labels: "ml job", " Ml  Job " -> "ML JOB"
+    df[LABEL_COL] = df[LABEL_COL].astype(str).str.split().str.join(" ").str.upper()
+
     # Group key: (source, author) so identical handles on different platforms stay separate
     group_col = "_group"
-    df[group_col] = (df["source"].astype(str) + "|" if "source" in df.columns else "") + df[args.author_col].astype(str)
+    prefix = df[SOURCE_COL].astype(str) + "|" if SOURCE_COL in df.columns else ""
+    df[group_col] = prefix + df[AUTHOR_COL].astype(str)
 
-    train, val, test, seed, labels = author_split(df, group_col, args.label_col, args.seeds)
+    # Split + training weights
+    train, val, test, labels = author_split(df, group_col, LABEL_COL)
     train["sample_weight"] = compute_sample_weights(
-        train, args.label_col, group_col, args.class_power, args.author_power
+        train, LABEL_COL, group_col, CLASS_POWER, AUTHOR_POWER
     )
 
-    out = Path(args.out_dir)
+    # Save
+    out = Path(OUT_DIR)
     out.mkdir(parents=True, exist_ok=True)
     for name, d in (("train", train), ("val", val), ("test", test)):
-        d.drop(columns=[group_col]).to_json(out / f"{name}.json", orient="records", indent=2, force_ascii=False)
-    json.dump(
-        {n: sorted(d[group_col].unique()) for n, d in (("train", train), ("val", val), ("test", test))},
-        open(out / "split_authors.json", "w"), indent=2, ensure_ascii=False,
-    )
+        d.drop(columns=[group_col]).to_json(
+            out / f"{name}.json", orient="records", indent=2, force_ascii=False
+        )
 
-    report = build_report(df, train, val, test, seed, labels, args.label_col, group_col)
-    (out / "split_report.txt").write_text(report)
+    with open(out / "split_authors.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {n: sorted(d[group_col].unique()) for n, d in (("train", train), ("val", val), ("test", test))},
+            f, indent=2, ensure_ascii=False,
+        )
+
+    report = build_report(df, train, val, test, labels, LABEL_COL, group_col)
+    (out / "split_report.txt").write_text(report, encoding="utf-8")
     print(report)
     print(f"\nSaved to {out}/. Leakage check passed.")
 

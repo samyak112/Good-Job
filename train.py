@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 import config as C
-from config import BOARD_LABELS, BOARD_VALUE, TYPE_LABELS
+from config import TYPE_LABELS
 from model import GoodJobForSequenceClassification
 
 MODEL_KEYS = ("input_ids", "attention_mask", "token_type_ids")
@@ -47,7 +47,6 @@ def load_examples(path):
         "text": r.get("post_text") or "",
         "author": r.get("author") or "",
         "type_y": TYPE_LABELS.index(r["label"]),
-        "board_y": int(r.get("poster") == BOARD_VALUE),
     } for r in rows]
     return rows, examples
 
@@ -61,7 +60,6 @@ def make_collate(tok):
         else:
             enc = tok(texts, truncation=True, max_length=C.MAX_LEN, padding=True, return_tensors="pt")
         enc["type_y"] = torch.tensor([b["type_y"] for b in batch])
-        enc["board_y"] = torch.tensor([b["board_y"] for b in batch])
         return enc
     return collate
 
@@ -87,30 +85,25 @@ def head_metrics(prefix, true, pred, names):
                                                   output_dict=True, zero_division=0),
         f"{prefix}_confusion": confusion_matrix(true, pred, labels=ids).tolist(),
     }
+    
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
-    tp, tt, bp, bt = [], [], [], []
+    tp, tt = [], []
     for b in loader:
-        o = model(**model_inputs(b, device)); lt, lb = o.logits, o.board_logits
-        tp += lt.argmax(-1).cpu().tolist()
+        o = model(**model_inputs(b, device))
+        tp += o.logits.argmax(-1).cpu().tolist()
         tt += b["type_y"].tolist()
-        keep = b["type_y"] != TYPE_LABELS.index("Not Job")
-        bp += lb.argmax(-1).cpu()[keep].tolist()
-        bt += b["board_y"][keep].tolist()
-    return {**head_metrics("type", tt, tp, TYPE_LABELS),
-            **head_metrics("board", bt, bp, BOARD_LABELS)}
-
+    return head_metrics("type", tt, tp, TYPE_LABELS)
 
 def print_summary(name, m):
-    print(f"[{name}] type macro-F1 {m['type_macro_f1']:.4f} | board macro-F1 {m['board_macro_f1']:.4f}")
+    print(f"[{name}] type macro-F1 {m['type_macro_f1']:.4f}")
     for l in TYPE_LABELS:
         r = m["type_report"][l]
         print(f"    {l:<8} P {r['precision']:.3f}  R {r['recall']:.3f}  F1 {r['f1-score']:.3f}  (n={int(r['support'])})")
     print("    type confusion (rows=true, cols=pred):", m["type_confusion"])
-    print("    board confusion:", m["board_confusion"])
 
 
 # ----------------------------------------------------------------------------
@@ -140,7 +133,7 @@ def main():
     elif C.IMBALANCE == "weights":
         type_w = inverse_freq_weights([e["type_y"] for e in train_ds], len(TYPE_LABELS),
                                       C.CLASS_POWER).to(device)
-    board_w = (inverse_freq_weights([e["board_y"] for e in train_ds if e["type_y"] != TYPE_LABELS.index("Not Job")],
+    board_w = (inverse_freq_weights([e["board_y"] for e in train_ds if e["type_y"] != TYPE_LABELS.index("NOT JOB")],
                                 len(BOARD_LABELS)).to(device)
            if C.BOARD_WEIGHTS else None)
 
@@ -168,11 +161,8 @@ def main():
         run = 0.0
         for b in train_loader:
             with torch.autocast(device_type=device, dtype=torch.float16, enabled=device == "cuda"):
-                o = model(**model_inputs(b, device)); lt, lb = o.logits, o.board_logits
-                ty = b["type_y"].to(device)
-                by = b["board_y"].to(device).masked_fill(ty == TYPE_LABELS.index("Not Job"), -100)
-                l_board = board_loss(lb.float(), by) if (by != -100).any() else lb.sum() * 0
-                loss = C.LAMBDA_TYPE * type_loss(lt.float(), ty) + C.LAMBDA_BOARD * l_board
+                o = model(**model_inputs(b, device))
+                loss = type_loss(o.logits.float(), b["type_y"].to(device))
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -183,8 +173,7 @@ def main():
             run += loss.item()
 
         m = evaluate(model, val_loader, device)
-        score = {"type": m["type_macro_f1"], "board": m["board_macro_f1"],
-                 "both": (m["type_macro_f1"] + m["board_macro_f1"]) / 2}[C.SELECT_ON]
+        score = m["type_macro_f1"]
         print(f"epoch {epoch}: train loss {run / len(train_loader):.4f}")
         print_summary("val", m)
         history.append({"epoch": epoch, "train_loss": run / len(train_loader), "val": m})
@@ -202,10 +191,10 @@ def main():
     tok.save_pretrained(out / "tokenizer")
     settings = {k.lower(): v for k, v in vars(C).items() if k.isupper()}
     (out / "config.json").write_text(json.dumps({
-        "type_labels": TYPE_LABELS, "board_labels": BOARD_LABELS, "model": C.MODEL,
+        "type_labels": TYPE_LABELS, "model": C.MODEL,
         "max_len": C.MAX_LEN, "use_author": C.USE_AUTHOR, "args": settings}, indent=2), encoding="utf-8")
     (out / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
-    print(f"best val score ({C.SELECT_ON}): {best:.4f}  -> {out / 'best.pt'}")
+    print(f"best val macro-F1: {best:.4f} -> {out / 'best.pt'}")
 
     if C.EVAL_TEST:
         model.load_state_dict(torch.load(out / "best.pt", map_location=device))
