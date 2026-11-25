@@ -37,7 +37,7 @@ except ImportError:
 # ---------------- CONFIG ----------------
 MODEL = "deepseek-flash"
 BASE_URL = "https://api.deepseek.com"
-API_KEY_ENV = "sk-d234fbce2fa8476db40215d0b9e2b42e"  # name of the environment variable holding your key
+API_KEY_ENV = "s"  # name of the environment variable holding your key
 TIMEOUT = 600      # seconds per request (thinking takes longer than a plain answer)
 MAX_RETRIES = 5    # the SDK retries rate limits / network blips / 5xx with backoff
 MAX_TOKENS = 4096  # max generated tokens; thinking counts toward this. If it runs out mid-think
